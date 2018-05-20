@@ -33,18 +33,16 @@ typedef struct {
 
 pthread_mutex_t mutex;
 pthread_cond_t* cond = NULL;
-int turn;  // current turn
 int nThreads; // # of threads
-int nWorkingThreads;  // # of working threads
-//int* done_threads;
 threadStatus* threadsStatus = NULL;
 char write_buffer[BUF_SIZE];
+int current_size_of_buffer = 0;
 
 void* thread_reader(void* arg) {
 	// get thread id
-	int id = ((threadInfo*)arg)->id;
-	char* file_name = ((threadInfo*)arg)->input_file;
-	int out_fd = ((threadInfo*)arg)->write_fd;
+	int id = ((threadInfo*) arg)->id;
+	char* file_name = ((threadInfo*) arg)->input_file;
+	int out_fd = ((threadInfo*) arg)->write_fd;
 
 	// create temp buffer
 	char reader_buffer[BUF_SIZE];
@@ -66,10 +64,14 @@ void* thread_reader(void* arg) {
 		// signaled, mutex is locked
 
 		// xor the data in (byte by byte)
-		xorBuffers(write_buffer, reader_buffer, len);
+		xorBuffers(write_buffer, reader_buffer, len_in);
 		// update my status
 		threadsStatus[id].finished_current_step = 1; // finished
 		threadsStatus[id].reads_done++;
+		// update buffer size
+		if (len_in > current_size_of_buffer) {
+			current_size_of_buffer = len_in;
+		}
 		// check who to wake up next
 		int current_step = findNextThread(threadsStatus);
 		//if i am last one- write to file and reset counter
@@ -77,10 +79,15 @@ void* thread_reader(void* arg) {
 			// finished i-th step, write buffer to file
 			finishedStep(threadsStatus);
 			// write to output
-			len_out = write(out_fd, write_buffer, BUF_SIZE); // TODO: write correct size!
+			len_out = write(out_fd, write_buffer, current_size_of_buffer);
+			// clear write buffer
+			current_size_of_buffer = 0;
+			memset(write_buffer, 0, sizeof(write_buffer));
 		}
 
-		int wake_next = current_step == -1 ? findNextThread(threadsStatus) : current_step;
+		int wake_next =
+				current_step == -1 ?
+						findNextThread(threadsStatus) : current_step;
 
 		if (wake_next != -1) { // not finished all
 			pthread_cond_signal(&cond[wake_next]);
@@ -100,6 +107,8 @@ void* thread_reader(void* arg) {
 	}
 
 	// free memory and exit
+	close(reader_fd);
+	free((threadInfo*) arg);
 	pthread_exit(NULL); // TODO: maybe change this?
 
 }
@@ -113,8 +122,8 @@ void xorBuffers(char* out_buff, char* in_buff, int size_of_in_buf) {
 
 int findNextThread(threadStatus* threadsStatus) {
 	for (int i = 0; i < nThreads; i++) {
-		if (threadsStatus[i].reads_done < threadsStatus[i].total_reads) {  // still active
-			if (!threadsStatus[i].finished_current_step) {  // did not finish i-th step
+		if (threadsStatus[i].reads_done < threadsStatus[i].total_reads) { // still active
+			if (!threadsStatus[i].finished_current_step) { // did not finish i-th step
 				return i;
 			}
 		}
@@ -124,16 +133,10 @@ int findNextThread(threadStatus* threadsStatus) {
 
 void finishedStep(threadStatus* threadsStatus) {
 	for (int i = 0; i < nThreads; i++) {
-		if (threadsStatus[i].reads_done < threadsStatus[i].total_reads) {  // still active
+		if (threadsStatus[i].reads_done < threadsStatus[i].total_reads) { // still active
 			threadsStatus[i].finished_current_step = 0;
 		}
 	}
-}
-
-void fillTotakNumberOfReads(threadStatus* threadsStatus, char* input_file_names) {
-	struct stat file_stat;
-	int file_size;
-
 }
 
 int handle_error_exit(const char* error_msg) {
@@ -146,7 +149,6 @@ int handle_error_exit(const char* error_msg) {
 	}
 	return errsv;
 }
-
 
 int main(int argc, char** argv) {
 	pthread_attr_t attr;
@@ -161,7 +163,7 @@ int main(int argc, char** argv) {
 	}
 
 	// check number of threads
-	nThreads = argc -2;
+	nThreads = argc - 2;
 	nWorkingThreads = nThreads;
 
 	// init mutex and attr
@@ -180,6 +182,19 @@ int main(int argc, char** argv) {
 	// clear write buffer
 	memset(write_buffer, 0, sizeof(write_buffer));
 
+	// set max number of reads
+	struct stat file_stat;
+	int file_size;
+	int temp_num_reads;
+	for (int i = 0; i < num_of_files; i++) {
+		// calculate number of reads
+		if (stat(argv[i + OFFSET], &file_stat) == -1) {
+			return handle_error_exit("Failed to retrieve stat data");
+		}
+		file_size = file_stat.st_size;
+		threadsStatus[i].total_reads = (temp_num_reads / BUF_SIZE) + 1;
+	}
+
 	// loop over and init cond
 	for (int i = 0; i < nThreads; i++) {
 		pthread_cond_init(&cond[i], NULL);
@@ -187,19 +202,15 @@ int main(int argc, char** argv) {
 
 	// start threads
 	for (int i = 0; i < nThreads; i++) {
-		// create id for thread
-		//int* id = malloc(sizeof(int));
-		//id[0] = i;
-
 		// create info struct for thread
 		threadInfo* current_info = malloc(sizeof(threadInfo));
 		current_info->id = i;
 		current_info->write_fd = write_fd;
-		current_info->input_file = malloc((strlen(argv[i + OFFSET]) + 1) * sizeof(char));
+		current_info->input_file = malloc(
+				(strlen(argv[i + OFFSET]) + 1) * sizeof(char));
 		strcpy(current_info->input_file, argv[i + OFFSET]);
-
 		// start thread
-		pthread_create(&threads[i], &atrr, thread_reader, (void*)current_info);
+		pthread_create(&threads[i], &atrr, thread_reader, (void*) current_info);
 	}
 
 	// signal first thread
@@ -211,6 +222,7 @@ int main(int argc, char** argv) {
 	}
 
 	//Clean up and exit
+	close(write_fd);
 	pthread_attr_destroy(&attr);
 	pthread_mutex_destroy(&mutex);
 
@@ -222,7 +234,7 @@ int main(int argc, char** argv) {
 	// free arrays
 	free(threads);
 	free(cond);
-	free(done_threads);
+	free(threadsStatus);
 
 	// TODO: pthread_exit(NULL); ?
 	return EXIT_SUCCESS;
