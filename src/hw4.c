@@ -37,6 +37,7 @@ int nThreads; // # of threads
 threadStatus* threadsStatusArray = NULL;
 char write_buffer[BUF_SIZE];
 int current_size_of_buffer = 0;
+int current_turn = -1;
 
 
 int my_ceil(float num) {
@@ -57,7 +58,6 @@ void xorBuffers(char* out_buff, char* in_buff, int size_of_in_buf) {
 int findNextThread(threadStatus* threadsStatus) {
 	printf("Looping over threadsStatus...\n");
 	for (int i = 0; i < nThreads; i++) {
-		printf("Thread [%d] with number of reads: [%d]... , with total of reads [%d]...\n", i, threadsStatus[i].reads_done, threadsStatus[i].total_reads);
 		if (threadsStatus[i].reads_done < threadsStatus[i].total_reads) { // still active
 			if (!threadsStatus[i].finished_current_step) { // did not finish i-th step
 				return i;
@@ -75,15 +75,8 @@ void finishedStep(threadStatus* threadsStatus) {
 	}
 }
 
-void printThreadsStatus() {
-	for (int i = 0; i < nThreads; i++) {
-		printf("Thread [%d] with number of reads: [%d]... , with total of reads [%d]...\n", i, threadsStatusArray[i].reads_done, threadsStatusArray[i].total_reads);
-	}
-}
-
 void* thread_reader(void* arg) {
 	printf("Starting thread...\n");
-	printThreadsStatus();
 	// get thread id
 	int id = ((threadInfo*) arg)->id;
 	char* file_name = ((threadInfo*) arg)->input_file;
@@ -111,7 +104,9 @@ void* thread_reader(void* arg) {
 		pthread_mutex_lock(&mutex);  // lock mutex
 		printf("Thread [%d]: lock mutex...\n", id);
 		printf("Thread [%d]: wait for signal...\n", id);
-		pthread_cond_wait(&cond[id], &mutex);  // wait for signal
+		while (current_turn != id) {
+			pthread_cond_wait(&cond[id], &mutex);  // wait for signal
+		}
 
 		printf("Thread [%d]:got signal, mutex locked...\n", id);
 
@@ -154,6 +149,7 @@ void* thread_reader(void* arg) {
 		printf("Thread [%d]: going to singal or exit, but first print...\n", id);
 		//printThreadsStatus();
 		if (wake_next != -1) { // not finished all
+			current_turn = wake_next;
 			pthread_cond_signal(&cond[wake_next]);
 		}
 		pthread_mutex_unlock(&mutex);
@@ -246,9 +242,8 @@ int main(int argc, char** argv) {
 	for (int i = 0; i < nThreads; i++) {
 		pthread_cond_init(&cond[i], NULL);
 	}
-	printThreadsStatus();
+
 	printf("Starting threads...\n");
-	sleep(5);
 	// start threads
 	for (int i = 0; i < nThreads; i++) {
 		// create info struct for thread
@@ -265,6 +260,7 @@ int main(int argc, char** argv) {
 	printf("Signal first thread...\n");
 	// signal first thread
 	sleep(1);
+	current_turn = 0;
 	pthread_cond_signal(&cond[0]); // TODO: maybe use other method of waking the cycle
 
 	printf("Finished signal...\n");
