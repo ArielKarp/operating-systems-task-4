@@ -16,7 +16,7 @@
 #include <sys/stat.h>
 #include <pthread.h>
 
-#define BUF_SIZE 1024000
+#define BUF_SIZE 1048576
 #define OFFSET 2
 
 typedef struct {
@@ -33,11 +33,12 @@ typedef struct {
 
 pthread_mutex_t mutex;
 pthread_cond_t* cond = NULL;
-int nThreads; // # of threads
+int nThreads;
 threadStatus* threadsStatusArray = NULL;
 char write_buffer[BUF_SIZE];
 int current_size_of_buffer = 0;
 int current_turn = -1;
+int total_size = 0;
 
 int my_ceil(float num) {
 	int inum = (int) num;
@@ -104,9 +105,15 @@ void* thread_reader(void* arg) {
 	ssize_t len_in;
 	while ((len_in = read(reader_fd, reader_buffer, BUF_SIZE)) > 0) { // have more to read
 		// read was successful
-		pthread_mutex_lock(&mutex);  // lock mutex
+		if (pthread_mutex_lock(&mutex) != 0) {
+			// lock mutex
+			handle_error_exit("Failed to lock the mutex");
+		}
 		while (current_turn != id) {
-			pthread_cond_wait(&cond[id], &mutex);  // wait for signal
+			if (pthread_cond_wait(&cond[id], &mutex) != 0){
+				// wait for signal
+				handle_error_exit("Failed to cond wait");
+			}
 		}
 		// signaled, mutex is locked
 		// xor the data in (byte by byte)
@@ -120,7 +127,7 @@ void* thread_reader(void* arg) {
 		}
 		// check who to wake up next
 		int current_step = findNextThread(threadsStatusArray);
-		//if thread is last one- write to file and reset flags
+		//if thread is last one - write to file and reset flags
 		if (current_step == -1) {
 			ssize_t len_out;
 			// finished i-th step, write buffer to file
@@ -130,6 +137,7 @@ void* thread_reader(void* arg) {
 			if (len_out < 0) {
 				handle_error_exit("Failed to write to shared buffer");
 			}
+			total_size += len_out;
 			// clear write buffer
 			current_size_of_buffer = 0;
 			memset(write_buffer, 0, sizeof(write_buffer));
@@ -139,11 +147,15 @@ void* thread_reader(void* arg) {
 				current_step == -1 ?
 						findNextThread(threadsStatusArray) : current_step;
 
-		if (wake_next != -1) { // not finished all
+		if (wake_next != -1) { // not all finished
 			current_turn = wake_next;
-			pthread_cond_signal(&cond[wake_next]);
+			if (pthread_cond_signal(&cond[wake_next]) != 0) {
+				handle_error_exit("Failed to signal a thread");
+			}
 		}
-		pthread_mutex_unlock(&mutex);
+		if (pthread_mutex_unlock(&mutex) != 0) {
+			handle_error_exit("Failed to unlock the mutex");
+		}
 	}
 
 	if (len_in < 0) {
@@ -156,6 +168,7 @@ void* thread_reader(void* arg) {
 		handle_error_exit("Failed to close readers' thread fd");
 	}
 	free((threadInfo*) arg);
+	free(reader_buffer);
 	pthread_exit(NULL);
 }
 
@@ -173,13 +186,19 @@ int main(int argc, char** argv) {
 		handle_error_exit("Error opening output file");
 	}
 
-	// check number of threads
+	// set number of threads
 	nThreads = argc - OFFSET;
 
 	// init mutex and attr
-	pthread_mutex_init(&mutex, NULL);
-	pthread_attr_init(&attr);
-	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+	if (pthread_mutex_init(&mutex, NULL) != 0) {
+		handle_error_exit("Failed to init mutex");
+	}
+	if (pthread_attr_init(&attr) != 0) {
+		handle_error_exit("Failed to init attr");
+	}
+	if (pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE) != 0) {
+		handle_error_exit("Failed to set detach state");
+	}
 
 	// allocate threads, cond and arrays
 	pthread_t* threads = malloc(nThreads * sizeof(pthread_t));
@@ -201,7 +220,7 @@ int main(int argc, char** argv) {
 	// set max number of reads
 	for (int i = 0; i < argc - OFFSET; i++) {
 		struct stat file_stat;
-		int file_size;
+		float file_size;
 		float temp_reads;
 		// calculate number of reads
 		if (stat(argv[i + OFFSET], &file_stat) == -1) {
@@ -214,7 +233,9 @@ int main(int argc, char** argv) {
 
 	// loop over and init cond
 	for (int i = 0; i < nThreads; i++) {
-		pthread_cond_init(&cond[i], NULL);
+		if (pthread_cond_init(&cond[i], NULL) != 0) {
+			handle_error_exit("Failed to init cond");
+		}
 	}
 
 	// start threads
@@ -233,34 +254,50 @@ int main(int argc, char** argv) {
 		}
 		strcpy(current_info->input_file, argv[i + OFFSET]);
 		// start thread
-		pthread_create(&threads[i], &attr, thread_reader, (void*) current_info);
+		if (pthread_create(&threads[i], &attr, thread_reader, (void*) current_info) != 0) {
+			handle_error_exit("Failed create a thread");
+		}
 	}
 
 	// signal first thread
-	sleep(1);
+	sleep(0.5);
 	current_turn = 0;
-	pthread_cond_signal(&cond[0]); // TODO: maybe use other method of waking the cycle
+	if (pthread_cond_signal(&cond[0]) != 0) {
+		handle_error_exit("Failed to signal a thread");
+	}
 
 	// join threads
 	for (int i = 0; i < nThreads; i++) {
-		pthread_join(threads[i], NULL);
+		if (pthread_join(threads[i], NULL) != 0) {
+			handle_error_exit("Failed to join a thread");
+		}
 	}
 
 	//Clean up and exit
-	close(write_fd);
-	pthread_attr_destroy(&attr);
-	pthread_mutex_destroy(&mutex);
+	if (close(write_fd) < 0) {
+		handle_error_exit("Failed to close fd of output file");
+	}
+
+	if (pthread_attr_destroy(&attr) != 0) {
+		handle_error_exit("Failed to destroy attr");
+	}
+	if (pthread_mutex_destroy(&mutex) != 0) {
+		handle_error_exit("Failed to destroy mutex");
+	}
 
 	// loop over and destroy cond
 	for (int i = 0; i < nThreads; i++) {
-		pthread_cond_destroy(&cond[i]);
+		if (pthread_cond_destroy(&cond[i]) != 0) {
+			handle_error_exit("Failed to destroy cond");
+		}
 	}
-
 	// free arrays
 	free(threads);
 	free(cond);
 	free(threadsStatusArray);
 
-	return EXIT_SUCCESS;
+	printf("Created %s with size %d bytes\n", argv[1], total_size);
+
+	exit(EXIT_SUCCESS);
 }
 
