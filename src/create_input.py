@@ -3,7 +3,7 @@
 import os
 
 NUM_OF_FILES = 10
-SIZE_OF_FILE = 1024000
+SIZE_OF_FILE = 1048576
 TIMES = 1
 
 if __name__ == '__main__':
