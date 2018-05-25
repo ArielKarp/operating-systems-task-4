@@ -167,6 +167,7 @@ void* thread_reader(void* arg) {
 	if (close(reader_fd) < 0) {
 		handle_error_exit("Failed to close readers' thread fd");
 	}
+	free(((threadInfo*) arg)->input_file);
 	free((threadInfo*) arg);
 	free(reader_buffer);
 	pthread_exit(NULL);
