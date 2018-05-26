@@ -261,7 +261,7 @@ int main(int argc, char** argv) {
 	}
 
 	// signal first thread
-	sleep(0.5);
+	sleep(1);
 	current_turn = 0;
 	if (pthread_cond_signal(&cond[0]) != 0) {
 		handle_error_exit("Failed to signal a thread");
